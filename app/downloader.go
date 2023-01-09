@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,11 +16,19 @@ import (
 	"gdm/model"
 )
 
+const (
+	AcceptRanges            string = "Accept-Ranges"
+	ContentLength           string = "Content-Length"
+	DefaultConcurrencyCount int    = 1
+	MaxConcurrencyCount     int    = 16
+	BufferSize              int    = 1048576 //bytes
+)
+
 type Downloader interface {
 	NewDownloader()
 
 	// private method
-	getRange(presChunk int) string
+	getRange(presChunk int) (int, int)
 
 	setFileNameFromRawUrl()
 	setHeadInfo()
@@ -28,22 +37,30 @@ type Downloader interface {
 	createFile()
 	createPartFile(partNo int) *os.File
 	combinePartFiles()
+	getRowNumber()
+	resetRow()
 
 	validate()
 }
 
 type downloader struct {
-	FileUrl          string `flg:"u"`
-	ConcurrencyCount int    `flg:"c"`
-	Location         string `flg:"l"`
-	FileName         string `flg:"n"`
+	FileUrl  string
+	Location string
+	FileName string
 
-	AcceptRanges  string
-	ContentLength int
-	ChunkSize     int
-	File          *os.File
-	WG            sync.WaitGroup
+	ConcurrencyCount int
+	AcceptRanges     string
+	ContentLength    int
+	ChunkSize        int
+
+	File  *os.File
+	WG    sync.WaitGroup
+	Mutex sync.Mutex
+	Row   int // from where progress bars will start to print
 }
+
+// ensures that all methods are implemented
+var _ Downloader = (*downloader)(nil)
 
 func DownloadManager(subCmd *model.SubCmd) {
 	d := &downloader{
@@ -61,6 +78,9 @@ func DownloadManager(subCmd *model.SubCmd) {
 	defer d.File.Close()
 
 	d.NewDownloader()
+
+	// reset terminal cursor to the next line of last progress bar
+	d.resetRow()
 }
 
 func (d *downloader) NewDownloader() {
@@ -68,7 +88,7 @@ func (d *downloader) NewDownloader() {
 	d.WG.Add(d.ConcurrencyCount)
 
 	// concurrently download the file
-	for i := 0; i < d.ConcurrencyCount; i++ {
+	for i := 1; i <= d.ConcurrencyCount; i++ {
 		go func(i int) {
 			defer d.WG.Done()
 			client := http.Client{}
@@ -78,8 +98,12 @@ func (d *downloader) NewDownloader() {
 				log.Fatal(err)
 			}
 
+			partFileLength := -1
 			if d.ChunkSize != -1 {
-				req.Header.Add("Range", d.getRange(i))
+				start, end := d.getRange(i)
+				rangeStr := fmt.Sprintf("%s=%d-%d", d.AcceptRanges, start, end)
+				req.Header.Add("Range", rangeStr)
+				partFileLength = end - start + 1
 			}
 
 			resp, err := client.Do(req)
@@ -89,7 +113,8 @@ func (d *downloader) NewDownloader() {
 			defer resp.Body.Close()
 
 			partFile := d.createPartFile(i)
-			_, err = io.CopyBuffer(partFile, resp.Body, make([]byte, BufferSize))
+			bar := NewProgressBar(partFileLength, d.Row+i, &d.Mutex)
+			_, err = io.CopyBuffer(io.MultiWriter(partFile, bar), resp.Body, make([]byte, BufferSize))
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -104,14 +129,13 @@ func (d *downloader) NewDownloader() {
 	d.combinePartFiles()
 }
 
-func (d *downloader) getRange(presChunk int) string {
-	chunkStart := presChunk * d.ChunkSize
-	chunkEnd := (presChunk+1)*d.ChunkSize - 1
-	if presChunk+1 == d.ConcurrencyCount {
+func (d *downloader) getRange(presChunk int) (int, int) {
+	chunkStart := (presChunk - 1) * d.ChunkSize
+	chunkEnd := presChunk*d.ChunkSize - 1
+	if presChunk == d.ConcurrencyCount {
 		chunkEnd = d.ContentLength - 1
 	}
-	rangeValue := fmt.Sprintf("%s=%d-%d", d.AcceptRanges, chunkStart, chunkEnd)
-	return rangeValue
+	return chunkStart, chunkEnd
 }
 
 func (d *downloader) setFileNameFromRawUrl() {
@@ -155,7 +179,7 @@ func (d *downloader) createFile() {
 }
 
 func (d *downloader) createPartFile(partNo int) *os.File {
-	// create part file in destination directory
+	// create a part file in destination directory
 	partFileName := fmt.Sprintf("%s.%d.part", d.FileName, partNo)
 	partFile, err := os.Create(filepath.Join(d.Location, partFileName))
 	if err != nil {
@@ -165,7 +189,7 @@ func (d *downloader) createPartFile(partNo int) *os.File {
 }
 
 func (d *downloader) combinePartFiles() {
-	for i := 0; i < d.ConcurrencyCount; i++ {
+	for i := 1; i <= d.ConcurrencyCount; i++ {
 		partFileName := fmt.Sprintf("%s.%d.part", d.FileName, i)
 		partFilePath := filepath.Join(d.Location, partFileName)
 		partFile, err := os.Open(partFilePath)
@@ -179,6 +203,32 @@ func (d *downloader) combinePartFiles() {
 		}
 		os.Remove(partFilePath)
 	}
+}
+
+func (d *downloader) getRowNumber() {
+	// first print new lines equal to concurrency count
+	// because if we don't print new lines then
+	// if gdm command is executed at the last line of terminal
+	// then progress bars won't show correctly
+	for i := 1; i <= d.ConcurrencyCount; i++ {
+		fmt.Printf("\n")
+	}
+
+	cmd := exec.Command("./app/row.sh")
+	output, err := cmd.Output()
+	if err != nil {
+		log.Println(err)
+	}
+	r := strings.Split(string(output), "\n")[0]
+	row, err := strconv.Atoi(r)
+	if err != nil {
+		log.Fatal("can't parse starting row number to print progress bar(s)")
+	}
+	d.Row = row - d.ConcurrencyCount
+}
+
+func (d *downloader) resetRow() {
+	fmt.Printf("%s%d;1H", escape, d.Row+d.ConcurrencyCount+1)
 }
 
 func (d *downloader) validate() {
@@ -206,6 +256,10 @@ func (d *downloader) validate() {
 		d.ChunkSize = d.ContentLength / d.ConcurrencyCount
 	} else {
 		d.ConcurrencyCount = DefaultConcurrencyCount
-		d.ChunkSize = -1 // means that the file can't be downloaded in chunk
+		d.ChunkSize = -1 // means that file can't be downloaded in chunk
 	}
+
+	d.Mutex = sync.Mutex{}
+
+	d.getRowNumber()
 }
