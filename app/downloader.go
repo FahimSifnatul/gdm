@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gdm/model"
 )
@@ -19,9 +20,9 @@ import (
 const (
 	AcceptRanges            string = "Accept-Ranges"
 	ContentLength           string = "Content-Length"
-	DefaultConcurrencyCount int    = 1
+	DefaultConcurrencyCount int    = 4
 	MaxConcurrencyCount     int    = 16
-	BufferSize              int    = 1048576 //bytes
+	BufferSize              int    = 1 * 1024 * 1024 // 1MB
 )
 
 type Downloader interface {
@@ -35,10 +36,11 @@ type Downloader interface {
 	setFileLocation()
 
 	createFile()
-	createPartFile(partNo int) *os.File
+	createAndGetPartFile(partNo int) *os.File
 	combinePartFiles()
-	getRowNumber()
-	resetRow()
+	setRowNumber()
+	resetRow(i int)
+	resetColor()
 
 	validate()
 }
@@ -80,7 +82,11 @@ func DownloadManager(subCmd *model.SubCmd) {
 	d.NewDownloader()
 
 	// reset terminal cursor to the next line of last progress bar
-	d.resetRow()
+	if d.ContentLength == 1 {
+		d.resetRow(1)
+	} else {
+		d.resetRow(2)
+	}
 }
 
 func (d *downloader) NewDownloader() {
@@ -112,7 +118,7 @@ func (d *downloader) NewDownloader() {
 			}
 			defer resp.Body.Close()
 
-			partFile := d.createPartFile(i)
+			partFile := d.createAndGetPartFile(i)
 			bar := NewProgressBar(partFileLength, d.Row+i, &d.Mutex)
 			_, err = io.CopyBuffer(io.MultiWriter(partFile, bar), resp.Body, make([]byte, BufferSize))
 			if err != nil {
@@ -178,7 +184,7 @@ func (d *downloader) createFile() {
 	}
 }
 
-func (d *downloader) createPartFile(partNo int) *os.File {
+func (d *downloader) createAndGetPartFile(partNo int) *os.File {
 	// create a part file in destination directory
 	partFileName := fmt.Sprintf("%s.%d.part", d.FileName, partNo)
 	partFile, err := os.Create(filepath.Join(d.Location, partFileName))
@@ -189,6 +195,25 @@ func (d *downloader) createPartFile(partNo int) *os.File {
 }
 
 func (d *downloader) combinePartFiles() {
+	// renders "Combining part files" message with spinner
+	ch := make(chan bool, 1)
+	d.WG.Add(1)
+	go func() {
+		defer d.WG.Done()
+		for {
+			for _, spin := range spinner {
+				d.resetRow(1)
+				d.resetColor()
+				fmt.Printf("%s Combining part files...", spin)
+				time.Sleep(250 * time.Millisecond)
+			}
+			if <-ch {
+				break
+			}
+		}
+	}()
+
+	// real parts to combine part files
 	for i := 1; i <= d.ConcurrencyCount; i++ {
 		partFileName := fmt.Sprintf("%s.%d.part", d.FileName, i)
 		partFilePath := filepath.Join(d.Location, partFileName)
@@ -203,9 +228,13 @@ func (d *downloader) combinePartFiles() {
 		}
 		os.Remove(partFilePath)
 	}
+
+	ch <- true
+	d.WG.Wait()
+	close(ch)
 }
 
-func (d *downloader) getRowNumber() {
+func (d *downloader) setRowNumber() {
 	// first print new lines equal to concurrency count
 	// because if we don't print new lines then
 	// if gdm command is executed at the last line of terminal
@@ -227,11 +256,23 @@ func (d *downloader) getRowNumber() {
 	d.Row = row - d.ConcurrencyCount
 }
 
-func (d *downloader) resetRow() {
-	fmt.Printf("%s%d;1H", escape, d.Row+d.ConcurrencyCount+1)
+func (d *downloader) resetRow(i int) {
+	escapeStr := fmt.Sprintf("%s%d;1H", escape, d.Row+d.ConcurrencyCount+i)
+	clearStr := fmt.Sprintf("%s%s", escape, clear)
+	fmt.Printf("%s%s", escapeStr, clearStr)
+}
+
+func (d *downloader) resetColor() {
+	c := escape + color
+	fmt.Printf("%s", c)
 }
 
 func (d *downloader) validate() {
+	// URL check
+	if d.FileUrl == "" {
+		log.Fatal("please provide a valid url")
+	}
+
 	// FileName check
 	if d.FileName == "" {
 		d.setFileNameFromRawUrl()
@@ -255,11 +296,11 @@ func (d *downloader) validate() {
 		}
 		d.ChunkSize = d.ContentLength / d.ConcurrencyCount
 	} else {
-		d.ConcurrencyCount = DefaultConcurrencyCount
+		d.ConcurrencyCount = 1
 		d.ChunkSize = -1 // means that file can't be downloaded in chunk
 	}
 
 	d.Mutex = sync.Mutex{}
 
-	d.getRowNumber()
+	d.setRowNumber()
 }

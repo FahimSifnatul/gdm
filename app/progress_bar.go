@@ -19,6 +19,8 @@ type ProgressBar interface {
 
 	// private methods
 	resetRow()
+	resetColor()
+	getSpinner() string
 	getElapsedTimeStr() string
 	buildProgress()
 	validate()
@@ -28,6 +30,7 @@ type progressBar struct {
 	ContentLength int
 	WrittenLength int
 	Progress      []string
+	SpinnerIndex  int // only if server has no concurrency support i.e. no ContentLength in url header
 
 	Message   string
 	Symbol    string
@@ -57,12 +60,16 @@ func (pb *progressBar) Write(p []byte) (int, error) {
 	defer pb.Mutex.Unlock()
 
 	pb.resetRow()
-	if pb.ContentLength == -1 {
-		fmt.Printf("%s", pb.Progress[0])
-		return len(p), nil
-	}
+	pb.resetColor()
 
 	pLen := len(p)
+
+	if pb.ContentLength == -1 {
+		fmt.Printf("%s %s %s", pb.getSpinner(), pb.Message, pb.getElapsedTimeStr())
+		pb.WrittenLength += pLen
+		return pLen, nil
+	}
+
 	barPos := int(math.Round(float64(pLen+pb.WrittenLength) / float64(pb.ContentLength) * 100.00))
 	if barPos < 0 {
 		barPos = 0
@@ -70,29 +77,44 @@ func (pb *progressBar) Write(p []byte) (int, error) {
 	if barPos > 100 {
 		barPos = 0
 	}
-	fmt.Printf("%s [%s]", pb.Progress[barPos], pb.getElapsedTimeStr())
+	fmt.Printf("%s %s", pb.Progress[barPos], pb.getElapsedTimeStr())
 	pb.WrittenLength += pLen
 	return pLen, nil
 }
 
 func (pb *progressBar) resetRow() {
-	fmt.Printf("%s%d;1H", escape, pb.RowNumber)
+	escapeStr := fmt.Sprintf("%s%d;1H", escape, pb.RowNumber)
+	clearStr := fmt.Sprintf("%s%s", escape, clear)
+	fmt.Printf("%s%s", escapeStr, clearStr)
+}
+
+func (pb *progressBar) resetColor() {
+	c := escape + color
+	fmt.Printf("%s", c)
+}
+
+func (pb *progressBar) getSpinner() string {
+	currentSpinner := spinner[pb.SpinnerIndex]
+	pb.SpinnerIndex++
+	if pb.SpinnerIndex == len(spinner) {
+		pb.SpinnerIndex = 0
+	}
+	return currentSpinner
 }
 
 func (pb *progressBar) getElapsedTimeStr() string {
 	currentTime := time.Now()
 	elapsedTime := currentTime.Sub(pb.StartTime)
-	elapsedTimeStr := fmt.Sprintf("%.0fh:%.0fm:%.0fs",
-		elapsedTime.Hours(),
-		elapsedTime.Minutes(),
-		elapsedTime.Seconds())
+	hour := int(elapsedTime.Hours())
+	min := int(elapsedTime.Minutes())
+	sec := int(elapsedTime.Seconds())
+	elapsedTimeStr := fmt.Sprintf("[%dh:%dm:%ds]", hour, min, sec)
 	return elapsedTimeStr
 }
 
 func (pb *progressBar) buildProgress() {
 	// ContentLength check
 	if pb.ContentLength == -1 {
-		pb.Progress = append(pb.Progress, pb.Message)
 		return
 	}
 
@@ -102,13 +124,12 @@ func (pb *progressBar) buildProgress() {
 	for i := 1; i < 51; i++ {
 		baseProgress = append(baseProgress, " ")
 	}
-	baseProgress = append(baseProgress, "|", "0%%")
+	baseProgress = append(baseProgress, "|", "0%")
 
 	pb.Progress = append(pb.Progress, strings.Join(baseProgress, ""))
 
 	for i := 1; i <= 100; i++ {
-		// decrease progress array length by 2
-		// e.g. for 2% download completion, 1 symbol will be printed to terminal
+		// for 2% download completion, 1 symbol will be printed to terminal
 		if i%2 == 0 {
 			baseProgress[i/2] = pb.Symbol
 		}
@@ -119,7 +140,7 @@ func (pb *progressBar) buildProgress() {
 }
 
 func (pb *progressBar) validate() {
-	if pb.ContentLength == 0 {
+	if pb.ContentLength <= 0 {
 		pb.ContentLength = -1
 	}
 	pb.buildProgress()

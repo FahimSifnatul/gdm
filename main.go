@@ -2,9 +2,15 @@ package main
 
 import (
 	"flag"
+	"fmt"
 
 	"gdm/app"
 	"gdm/model"
+)
+
+const (
+	bold  string = "\033[1m"
+	green string = "\033[92m"
 )
 
 func main() {
@@ -16,4 +22,5 @@ func main() {
 	flag.Parse()
 
 	app.DownloadManager(subCmd)
+	fmt.Printf("%s%sDownload Completed!!!\n", bold, green)
 }
