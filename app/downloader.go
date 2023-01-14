@@ -160,6 +160,10 @@ func (d *downloader) setHeadInfo() {
 		log.Fatal(err)
 	}
 
+	if head.StatusCode < 200 || head.StatusCode > 299 {
+		log.Fatal("invalid file url")
+	}
+
 	d.AcceptRanges = head.Header.Get(AcceptRanges)
 	d.ContentLength, err = strconv.Atoi(head.Header.Get(ContentLength))
 	if err != nil {
