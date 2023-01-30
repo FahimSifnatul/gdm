@@ -106,9 +106,9 @@ func (pb *progressBar) getElapsedTimeStr() string {
 	currentTime := time.Now()
 	elapsedTime := currentTime.Sub(pb.StartTime)
 	hour := int(elapsedTime.Hours())
-	min := int(elapsedTime.Minutes())
-	sec := int(elapsedTime.Seconds())
-	elapsedTimeStr := fmt.Sprintf("[%dh:%dm:%ds]", hour, min, sec)
+	min := int(elapsedTime.Minutes()) % 60
+	sec := int(elapsedTime.Seconds()) % 60
+	elapsedTimeStr := fmt.Sprintf("[%02d:%02d:%02d]", hour, min, sec)
 	return elapsedTimeStr
 }
 
@@ -124,7 +124,7 @@ func (pb *progressBar) buildProgress() {
 	for i := 1; i < 51; i++ {
 		baseProgress = append(baseProgress, " ")
 	}
-	baseProgress = append(baseProgress, "|", "0%")
+	baseProgress = append(baseProgress, "|", "  0%")
 
 	pb.Progress = append(pb.Progress, strings.Join(baseProgress, ""))
 
@@ -134,7 +134,7 @@ func (pb *progressBar) buildProgress() {
 			baseProgress[i/2] = pb.Symbol
 		}
 		// change percentage to current percentage
-		baseProgress[len(baseProgress)-1] = fmt.Sprintf("%d%%", i)
+		baseProgress[len(baseProgress)-1] = fmt.Sprintf("%3d%%", i)
 		pb.Progress = append(pb.Progress, strings.Join(baseProgress, ""))
 	}
 }

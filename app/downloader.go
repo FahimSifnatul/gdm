@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -177,6 +178,11 @@ func (d *downloader) setFileLocation() {
 		log.Fatal(err)
 	}
 	d.Location = filepath.Join(pwd, "Downloads")
+	if _, err := os.Stat(d.Location); errors.Is(err, os.ErrNotExist) {
+		if err = os.Mkdir(d.Location, os.ModePerm); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 
 func (d *downloader) createFile() {
